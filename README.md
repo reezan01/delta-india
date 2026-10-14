@@ -79,7 +79,13 @@ underlying on every run, to `data/options/{UND}/{date}/{HHMMSS}.csv.gz`. That's 
 with greeks and IVs, in the same columns as `delta chain --save`. Read a snapshot with
 `pandas.read_csv(path)` or `gzip -dc path`. A snapshot is flagged STALE when its median
 ticker is more than 5 min old, so a frozen options feed is reported instead of being saved silently.
-Size is about 40 KB (BTC) plus 22 KB (ETH) per run, roughly 6 MB/day or 2 GB/year.
+Size is about 40 KB (BTC) plus 22 KB (ETH) per run, roughly 6 MB/day.
+
+**Retention:** day folders older than `retention_days` (default 90, set in `[options]`) are
+deleted at the end of each run, which caps the store at about 550 MB. Pruning only removes
+`YYYY-MM-DD` folders containing files named `HHMMSS.csv[.gz]`. It never follows symlinks,
+leaves any other file alone, and keeps a folder that still has other files in it.
+A deletion shows up in the log as `prune -N`.
 
 ## Facts verified against the live API (2026-10-14)
 

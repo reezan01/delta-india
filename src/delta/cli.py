@@ -83,11 +83,19 @@ def cmd_update(rest: DeltaRest, args, data_dir: Path) -> int:
         last = datetime.fromtimestamp(r.last_bar, tz=timezone.utc).strftime("%m-%d %H:%M") if r.last_bar else "-"
         status = "ERROR" if r.error else "STALE" if r.stale else "ok"
         bad += status != "ok"
+        if r.resolution == "prune":
+            if r.removed or r.error or not args.quiet_ok:
+                print(f"{stamp}  {status:<5} {r.symbol:<14} prune -{r.removed} old snapshot files"
+                      + (f"  {r.error}" if r.error else ""))
+            continue
         if status == "ok" and args.quiet_ok:
             continue
         print(f"{stamp}  {status:<5} {r.symbol:<14} {r.resolution:<5} +{r.appended:<6} last {last}"
               + (f"  {r.error}" if r.error else ""))
-    print(f"{stamp}  done: {len(results)} series, {bad} not ok, {time.time() - started:.1f}s")
+    pruned = sum(r.removed for r in results)
+    n = sum(r.resolution != "prune" for r in results)
+    print(f"{stamp}  done: {n} series, {bad} not ok"
+          + (f", pruned {pruned} old snapshots" if pruned else "") + f", {time.time() - started:.1f}s")
     return 1 if bad else 0
 
 

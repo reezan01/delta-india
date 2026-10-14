@@ -127,4 +127,70 @@ def test_options_only_watchlist_runs_and_includes_chain(tmp_path):
     wl.write_text('[options]\nunderlyings=["BTC"]\n')
     rest = FakeOptRest([opt("C-BTC-100-171026", 1)])
     res = run_update(rest, tmp_path / "data", wl)
-    assert [(r.symbol, r.resolution, r.appended) for r in res] == [("BTC", "chain", 1)]
+    assert [(r.symbol, r.resolution, r.appended) for r in res] == [("BTC", "chain", 1), ("BTC", "prune", 0)]
+
+
+# ── options retention ─────────────────────────────────────────────────────
+from datetime import date
+
+from delta.update import prune_options
+
+TODAY = date(2026, 10, 14)
+
+
+def make_day(root, day, files=("120000.csv.gz", "121500.csv.gz")):
+    d = root / "options" / "BTC" / day
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f).write_text("x")
+    return d
+
+
+def test_prune_deletes_only_days_past_retention(tmp_path):
+    old = make_day(tmp_path, "2026-07-15")       # 91 days old  -> deleted
+    edge = make_day(tmp_path, "2026-07-16")      # exactly 90   -> kept
+    new = make_day(tmp_path, "2026-10-14")
+    r = prune_options(tmp_path, "btc", 90, today=TODAY)
+    assert r.error is None and r.removed == 2
+    assert not old.exists() and edge.exists() and new.exists()
+
+
+def test_prune_never_touches_foreign_files_or_folders(tmp_path):
+    mine_and_foreign = make_day(tmp_path, "2020-01-01", files=("120000.csv.gz", "notes.txt"))
+    not_a_date = make_day(tmp_path, "archive", files=("120000.csv.gz",))
+    # date.fromisoformat() accepts "20200101" (basic ISO); only the strict name check protects it
+    basic_iso = make_day(tmp_path, "20200101", files=("120000.csv.gz",))
+    r = prune_options(tmp_path, "BTC", 90, today=TODAY)
+    assert r.removed == 1
+    assert (basic_iso / "120000.csv.gz").exists()
+    assert (mine_and_foreign / "notes.txt").exists()          # folder kept: not empty
+    assert (not_a_date / "120000.csv.gz").exists()
+
+
+def test_prune_does_not_follow_symlinked_day_folders(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "120000.csv.gz").write_text("precious")
+    root = tmp_path / "options" / "BTC"
+    root.mkdir(parents=True)
+    (root / "2020-01-01").symlink_to(target)
+    prune_options(tmp_path, "BTC", 90, today=TODAY)
+    assert (target / "120000.csv.gz").exists()
+
+
+def test_prune_rejects_nonsense_retention(tmp_path):
+    make_day(tmp_path, "2026-10-13")
+    r = prune_options(tmp_path, "BTC", 0, today=TODAY)
+    assert r.error and r.removed == 0
+
+
+def test_run_update_prunes_with_configured_retention(tmp_path):
+    wl = tmp_path / "w.toml"
+    wl.write_text('[options]\nunderlyings=["BTC"]\nretention_days=30\n')
+    data = tmp_path / "data"
+    from datetime import timedelta
+    # 45 days old: deleted under the configured 30, but would survive the default 90
+    old = make_day(data, (datetime.now(timezone.utc).date() - timedelta(days=45)).isoformat())
+    res = run_update(FakeOptRest([opt("C-BTC-100-171026", 1)]), data, wl)
+    prune = [r for r in res if r.resolution == "prune"]
+    assert len(prune) == 1 and prune[0].removed == 2 and not old.exists()

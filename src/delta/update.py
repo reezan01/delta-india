@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import fcntl
 import logging
+import re
 import time
 import tomllib
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-
-from datetime import datetime, timezone
 from statistics import median
 
 from delta.options import OptionQuote, write_snapshot_csv
@@ -30,6 +30,11 @@ DEFAULT_INITIAL_DAYS = {"1m": 30, "3m": 60, "5m": 180, "15m": 365, "30m": 365,
 # An options snapshot whose median ticker is older than this is a frozen feed, not a market.
 OPTIONS_STALE_SECONDS = 300
 
+# Options snapshots older than this many days are deleted (override: [options] retention_days).
+DEFAULT_OPTIONS_RETENTION_DAYS = 90
+_DATE_DIR = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SNAPSHOT_FILE = re.compile(r"^\d{6}\.csv(\.gz)?$")
+
 # A closed bar should exist within this many bar-lengths of now; beyond it the series is stale.
 STALE_BARS = 3
 
@@ -42,6 +47,7 @@ class SeriesResult:
     last_bar: int | None = None
     stale: bool = False
     error: str | None = None
+    removed: int = 0   # files deleted (resolution "prune" only)
 
 
 def sync_series(rest: DeltaRest, data_dir: Path, symbol: str, resolution: str,
@@ -89,9 +95,47 @@ def snapshot_options(rest: DeltaRest, data_dir: Path, underlying: str,
     return res
 
 
-def load_option_underlyings(path: Path) -> list[str]:
-    """[options] underlyings=[...]"""
-    return list(tomllib.loads(path.read_text()).get("options", {}).get("underlyings", []))
+def prune_options(data_dir: Path, underlying: str, retention_days: int,
+                  today: date | None = None) -> SeriesResult:
+    """Delete snapshot day-folders older than `retention_days` (UTC dates).
+
+    Only touches what this program writes: folders named YYYY-MM-DD under
+    data/options/{UND}/, and inside them only files named HHMMSS.csv[.gz]. Anything
+    else is left alone, and a folder is removed only once it is empty.
+    """
+    res = SeriesResult(underlying.upper(), "prune")
+    if retention_days < 1:
+        res.error = f"retention_days must be >= 1, got {retention_days}"
+        return res
+    cutoff = (today or datetime.now(timezone.utc).date()) - timedelta(days=retention_days)
+    root = Path(data_dir) / "options" / underlying.upper()
+    if not root.is_dir():
+        return res
+    try:
+        for day_dir in sorted(root.iterdir()):
+            if day_dir.is_symlink() or not day_dir.is_dir() or not _DATE_DIR.match(day_dir.name):
+                continue
+            try:
+                day = date.fromisoformat(day_dir.name)
+            except ValueError:
+                continue
+            if day >= cutoff:
+                continue
+            for f in day_dir.iterdir():
+                if f.is_file() and not f.is_symlink() and _SNAPSHOT_FILE.match(f.name):
+                    f.unlink()
+                    res.removed += 1
+            if not any(day_dir.iterdir()):
+                day_dir.rmdir()
+    except OSError as e:
+        res.error = f"{type(e).__name__}: {e}"
+    return res
+
+
+def load_options_config(path: Path) -> tuple[list[str], int]:
+    """[options] underlyings=[...] retention_days=<optional, default 90>"""
+    opts = tomllib.loads(path.read_text()).get("options", {})
+    return list(opts.get("underlyings", [])), int(opts.get("retention_days", DEFAULT_OPTIONS_RETENTION_DAYS))
 
 
 def load_watchlist(path: Path, allow_empty: bool = False) -> list[tuple[str, str, int | None]]:
@@ -117,10 +161,11 @@ def run_update(rest: DeltaRest, data_dir: Path, watchlist: Path) -> list[SeriesR
     except BlockingIOError:
         raise RuntimeError("another `delta update` is still running") from None
     try:
-        underlyings = load_option_underlyings(watchlist)
+        underlyings, retention = load_options_config(watchlist)
         series = load_watchlist(watchlist, allow_empty=bool(underlyings))
         results = [sync_series(rest, data_dir, s, r, d) for s, r, d in series]
         results += [snapshot_options(rest, data_dir, u) for u in underlyings]
+        results += [prune_options(data_dir, u, retention) for u in underlyings]
         return results
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
