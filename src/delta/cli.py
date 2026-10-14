@@ -15,6 +15,7 @@ from pathlib import Path
 from delta.config import load_settings
 from delta.rest import RESOLUTION_SECONDS, DeltaAPIError, DeltaRest
 from delta.store import append_candles, candle_path, count_gaps, last_time
+from delta.options import OptionQuote, build_chain, summarize, write_snapshot_csv
 from delta.update import run_update
 from delta.ws import stream
 
@@ -90,6 +91,89 @@ def cmd_update(rest: DeltaRest, args, data_dir: Path) -> int:
     return 1 if bad else 0
 
 
+def _n(x, fmt: str, width: int) -> str:
+    return (format(x, fmt) if x is not None else "-").rjust(width)
+
+
+def cmd_chain(rest: DeltaRest, args, data_dir: Path) -> int:
+    taken = datetime.now(timezone.utc)
+    quotes = [OptionQuote.from_ticker(t) for t in rest.option_tickers(args.underlying)]
+    if not quotes:
+        print(f"no options listed for {args.underlying}", file=sys.stderr)
+        return 1
+    chain = build_chain(quotes)
+    sums = {e: summarize(e, rows, taken) for e, rows in chain.items()}
+    expiries = list(chain)
+
+    stale = [q for q in quotes if q.ticker_ts and taken.timestamp() - q.ticker_ts / 1e6 > 300]
+    if args.save:
+        path = (data_dir / "options" / args.underlying.upper() / taken.strftime("%Y-%m-%d")
+                / f"{taken.strftime('%H%M%S')}.csv")
+        write_snapshot_csv(path, quotes, taken)
+        print(f"saved {len(quotes)} options -> {path}")
+        if args.quiet:
+            return 0
+
+    spot = next((s.spot for s in sums.values() if s.spot), None)
+    print(f"\n{args.underlying.upper()} options  spot {spot:,.1f}  {taken:%Y-%m-%d %H:%M:%S} UTC  "
+          f"{len(quotes)} contracts, {len(expiries)} expiries"
+          + (f"  ⚠ {len(stale)} tickers >5min old" if stale else ""))
+    print(f"\n  {'#':>2} {'expiry':<10} {'days':>6} {'strikes':>7} {'ATM':>8} {'ATM IV':>7} "
+          f"{'25d RR':>7} {'P/C OI':>7} {'max pain':>9} {'call OI':>9} {'put OI':>9}")
+    for i, (e, s) in enumerate(sums.items()):
+        print(f"  {i:>2} {e.isoformat():<10} {s.days:6.2f} {s.strikes:7d} {_n(s.atm_strike, ',.0f', 8)} "
+              f"{_n(s.atm_iv and s.atm_iv * 100, '.1f', 6)}% {_n(s.rr25 and s.rr25 * 100, '+.1f', 6)}% "
+              f"{_n(s.put_call_oi, '.2f', 7)} {_n(s.max_pain, ',.0f', 9)} {s.call_oi:9.2f} {s.put_oi:9.2f}")
+
+    # Pick the expiry to print: index, date, or the nearest by default.
+    if args.expiry is None:
+        exp = expiries[0]
+    elif args.expiry.isdigit() and int(args.expiry) < len(expiries):
+        exp = expiries[int(args.expiry)]
+    else:
+        try:
+            exp = datetime.strptime(args.expiry, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"--expiry: use an index 0-{len(expiries) - 1} or YYYY-MM-DD", file=sys.stderr)
+            return 2
+        if exp not in chain:
+            print(f"no {args.underlying} options expire {exp}", file=sys.stderr)
+            return 2
+
+    rows, s = chain[exp], sums[exp]
+    if s.atm_strike is not None and args.strikes:
+        i = next(k for k, r in enumerate(rows) if r.strike == s.atm_strike)
+        rows = rows[max(i - args.strikes, 0): i + args.strikes + 1]
+
+    wide = args.wide
+    side = ["OI", "IV%", "delta"] + (["gamma", "vega", "theta"] if wide else []) + ["bid", "ask", "mark"]
+    w = [7, 6, 7] + ([9, 7, 8] if wide else []) + [8, 8, 8]
+
+    def cells(q, order):
+        if q is None:
+            vals = [None] * len(order)
+        else:
+            m = {"OI": (q.oi, ".2f"), "IV%": (q.mark_iv and q.mark_iv * 100, ".1f"),
+                 "delta": (q.delta, "+.3f"), "gamma": (q.gamma, ".2e"), "vega": (q.vega, ".2f"),
+                 "theta": (q.theta, ".1f"), "bid": (q.bid, ",.1f"), "ask": (q.ask, ",.1f"),
+                 "mark": (q.mark, ",.1f")}
+            return " ".join(_n(m[c][0], m[c][1], w[side.index(c)]) for c in order)
+        return " ".join("-".rjust(w[side.index(c)]) for c in order)
+
+    # Mirror the call side around the strike, but keep bid before ask.
+    put_order = ["mark", "bid", "ask"] + list(reversed(side[:-3]))
+    print(f"\n{exp}  ({s.days:.2f} days, settles 12:00 UTC)  ATM {s.atm_strike:,.0f}  "
+          f"prices USD per 1 {args.underlying.upper()}; vega per vol-pt; theta per day")
+    half = sum(w) + len(w) - 1
+    print("CALLS".center(half) + " │" + " " * 10 + "│ " + "PUTS".center(half))
+    print(" ".join(c.rjust(w[side.index(c)]) for c in side) + " │" + "STRIKE".center(10) + "│ "
+          + " ".join(c.rjust(w[side.index(c)]) for c in put_order))
+    for r in rows:
+        mark = "◀" if r.strike == s.atm_strike else " "
+        print(cells(r.call, side) + " │" + f"{r.strike:>9,.0f}{mark}" + "│ " + cells(r.put, put_order))
+    return 0
+
+
 def cmd_stream(settings, args) -> None:
     """Print to stdout, and with --out append NDJSON per channel per UTC day."""
     out_dir = Path(args.out) if args.out else None
@@ -137,6 +221,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--watchlist", default=str(Path(__file__).resolve().parents[2] / "watchlist.toml"))
     p.add_argument("--quiet-ok", action="store_true", help="print only problem series + the summary")
 
+    p = sub.add_parser("chain", help="options chain snapshot with greeks")
+    p.add_argument("underlying", help="BTC, ETH, ...")
+    p.add_argument("--expiry", help="index from the expiry table, or YYYY-MM-DD (default: nearest)")
+    p.add_argument("--strikes", type=int, default=8, help="strikes each side of ATM (0 = all)")
+    p.add_argument("--wide", action="store_true", help="also show gamma, vega, theta")
+    p.add_argument("--save", action="store_true", help="write every contract to data/options/...csv")
+    p.add_argument("--quiet", action="store_true", help="with --save: don't print the table")
+
     p = sub.add_parser("stream", help="live WebSocket feed")
     p.add_argument("symbols", help="comma-separated, e.g. BTCUSD,ETHUSD")
     p.add_argument("--channels", default="v2/ticker", help="e.g. v2/ticker,candlestick_1m,all_trades")
@@ -171,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
                 cmd_ticker(rest, args)
             elif args.cmd == "candles":
                 cmd_candles(rest, args, settings.data_dir)
+            elif args.cmd == "chain":
+                return cmd_chain(rest, args, settings.data_dir)
             elif args.cmd == "update":
                 return cmd_update(rest, args, settings.data_dir)
             elif args.cmd == "balances":

@@ -105,6 +105,14 @@ class DeltaRest:
     def tickers(self, contract_types: str | None = None) -> list[dict]:
         return self._get("/v2/tickers", {"contract_types": contract_types})["result"]
 
+    def option_tickers(self, underlying: str, expiry_date=None) -> list[dict]:
+        """All call+put tickers for an underlying (e.g. 'BTC'), optionally one expiry (a date)."""
+        return self._get("/v2/tickers", {
+            "contract_types": "call_options,put_options",
+            "underlying_asset_symbols": underlying.upper(),
+            "expiry_date": expiry_date.strftime("%d-%m-%Y") if expiry_date else None,
+        })["result"]
+
     def ticker(self, symbol: str) -> dict:
         return self._get(f"/v2/tickers/{symbol}")["result"]
 

@@ -27,6 +27,32 @@ cp .env.example .env     # keys optional; public data needs none
 
 Candles go to `data/candles/{SYMBOL}/{resolution}.csv`: ascending, de-duplicated, closed bars only.
 
+## Options chain
+
+```bash
+.venv/bin/delta chain BTC                       # expiry table + nearest expiry, 8 strikes each side of ATM
+.venv/bin/delta chain ETH --expiry 4 --wide     # pick by table index (or YYYY-MM-DD); add gamma/vega/theta
+.venv/bin/delta chain BTC --strikes 0           # every strike
+.venv/bin/delta chain BTC --save --quiet        # all contracts -> data/options/BTC/{date}/{HHMMSS}.csv
+```
+
+The expiry table shows ATM IV, the 25-delta risk reversal (call IV minus put IV at the
+listed strikes nearest ±0.25 delta, not interpolated), put/call OI ratio, max pain, and OI by side.
+
+**Units.** These were verified by reproducing Delta's greeks with Black-Scholes (r=0, expiry 12:00 UTC):
+
+| Field | Unit |
+|---|---|
+| mark / bid / ask | USD per **1 BTC** of underlying, not per contract (1 contract = 0.001 BTC) |
+| IV | fraction from the API, shown as % |
+| delta / gamma | per 1 underlying / per $1 move |
+| vega | USD per 1 vol **point** |
+| theta | USD per **calendar day** |
+| OI | underlying units (BTC / ETH) |
+
+Deep in-the-money options carry placeholder IVs from Delta (bid/ask 0.000005, mark at the
+venue floor). They are shown as `-` rather than as a number.
+
 ## Scheduled updates
 
 `delta update` brings every series in [watchlist.toml](watchlist.toml) up to date. A new
