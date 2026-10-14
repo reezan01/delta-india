@@ -15,6 +15,7 @@ from pathlib import Path
 from delta.config import load_settings
 from delta.rest import RESOLUTION_SECONDS, DeltaAPIError, DeltaRest
 from delta.store import append_candles, candle_path, count_gaps, last_time
+from delta.update import run_update
 from delta.ws import stream
 
 
@@ -68,6 +69,27 @@ def cmd_candles(rest: DeltaRest, args, data_dir: Path) -> None:
           f"\n  range {first} -> {last}\n  gaps (missing bars) {count_gaps(times, step)}")
 
 
+def cmd_update(rest: DeltaRest, args, data_dir: Path) -> int:
+    started = time.time()
+    try:
+        results = run_update(rest, data_dir, Path(args.watchlist))
+    except RuntimeError as e:  # overlapping run: not a failure, the other run is doing the work
+        print(f"skip: {e}")
+        return 0
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    bad = 0
+    for r in results:
+        last = datetime.fromtimestamp(r.last_bar, tz=timezone.utc).strftime("%m-%d %H:%M") if r.last_bar else "-"
+        status = "ERROR" if r.error else "STALE" if r.stale else "ok"
+        bad += status != "ok"
+        if status == "ok" and args.quiet_ok:
+            continue
+        print(f"{stamp}  {status:<5} {r.symbol:<14} {r.resolution:<4} +{r.appended:<6} last {last}"
+              + (f"  {r.error}" if r.error else ""))
+    print(f"{stamp}  done: {len(results)} series, {bad} not ok, {time.time() - started:.1f}s")
+    return 1 if bad else 0
+
+
 def cmd_stream(settings, args) -> None:
     """Print to stdout, and with --out append NDJSON per channel per UTC day."""
     out_dir = Path(args.out) if args.out else None
@@ -111,6 +133,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--start", help="YYYY-MM-DD (forces a range fetch)")
     p.add_argument("--end", help="YYYY-MM-DD (default now)")
 
+    p = sub.add_parser("update", help="bring every watchlist series up to date (scheduled job)")
+    p.add_argument("--watchlist", default=str(Path(__file__).resolve().parents[2] / "watchlist.toml"))
+    p.add_argument("--quiet-ok", action="store_true", help="print only problem series + the summary")
+
     p = sub.add_parser("stream", help="live WebSocket feed")
     p.add_argument("symbols", help="comma-separated, e.g. BTCUSD,ETHUSD")
     p.add_argument("--channels", default="v2/ticker", help="e.g. v2/ticker,candlestick_1m,all_trades")
@@ -145,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
                 cmd_ticker(rest, args)
             elif args.cmd == "candles":
                 cmd_candles(rest, args, settings.data_dir)
+            elif args.cmd == "update":
+                return cmd_update(rest, args, settings.data_dir)
             elif args.cmd == "balances":
                 _print(rest.wallet_balances())
             elif args.cmd == "positions":

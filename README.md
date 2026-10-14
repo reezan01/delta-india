@@ -27,6 +27,27 @@ cp .env.example .env     # keys optional; public data needs none
 
 Candles go to `data/candles/{SYMBOL}/{resolution}.csv`: ascending, de-duplicated, closed bars only.
 
+## Scheduled updates
+
+`delta update` brings every series in [watchlist.toml](watchlist.toml) up to date. A new
+series is backfilled on its first run; after that only new closed bars are appended.
+It exits non-zero if any series errors **or is stale** (no closed bar within 4 bar-lengths
+of now), so a feed that silently stops never reads as "ok". Overlapping runs are skipped.
+
+```bash
+scripts/install-schedule.sh            # LaunchAgent, every 15 min + at login
+scripts/install-schedule.sh 300        # custom interval (seconds)
+scripts/install-schedule.sh --remove   # uninstall
+tail -f data/logs/update.log           # one summary line per run, plus any ERROR/STALE rows
+launchctl print gui/$(id -u)/local.delta-india.candles | grep -E "runs|last exit"
+```
+
+It runs only while the Mac is awake. After sleep, launchd fires once on wake and the
+incremental fetch fills the gap. The 1m series can recover up to 2000 bars (~33h) per request
+and pages beyond that, so a long sleep is caught up rather than left as a gap.
+
+To add symbols, edit `watchlist.toml`. Nothing needs reinstalling.
+
 ## Facts verified against the live API (2026-10-14)
 
 | | |

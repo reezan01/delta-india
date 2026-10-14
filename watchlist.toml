@@ -1,0 +1,7 @@
+# Series kept current by `delta update` (run every 15 min by the LaunchAgent).
+# A new entry is backfilled on its first run (see DEFAULT_INITIAL_DAYS in update.py,
+# or set initial_days on the block); later runs append only new closed bars.
+
+[[series]]
+symbols = ["BTCUSD", "ETHUSD"]
+resolutions = ["1m", "5m", "15m", "1h", "4h", "1d"]
