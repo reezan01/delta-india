@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is where the scheduled job actually runs; Linux catches anything macOS-only.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: CLI entry point resolves
+        run: |
+          delta --help > /dev/null
+          delta chain --help > /dev/null
+          delta update --help > /dev/null
+
+      - name: Tests (network blocked — the suite must never call Delta)
+        run: |
+          python - <<'PY'
+          import socket, sys, pytest
+          def deny(*a, **k):
+              raise RuntimeError(f"test attempted network access: {a}")
+          socket.socket.connect = deny
+          socket.create_connection = deny
+          sys.exit(pytest.main(["-q", "-ra"]))
+          PY

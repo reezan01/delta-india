@@ -1,5 +1,7 @@
 # Delta Exchange India — read-only client
 
+[![tests](https://github.com/reezan01/delta-india/actions/workflows/tests.yml/badge.svg)](https://github.com/reezan01/delta-india/actions/workflows/tests.yml)
+
 REST client, WebSocket feed and incremental candle store for **Delta Exchange India**.
 It is read-only by design: there is no code path that places, edits or cancels an order.
 
