@@ -18,6 +18,7 @@ near the venue floor; those IVs are reported as None, not as a real number.
 from __future__ import annotations
 
 import csv
+import gzip
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -168,8 +169,9 @@ def summarize(expiry: date, rows: list[StrikeRow], now: datetime | None = None) 
 def write_snapshot_csv(path: Path, quotes: list[OptionQuote], taken_at: datetime) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = ["taken_at"] + [f.name for f in fields(OptionQuote)]
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", newline="") as f:
+    tmp = path.with_name(path.name + ".tmp")
+    opener = gzip.open if path.name.endswith(".gz") else open
+    with opener(tmp, "wt", newline="") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for q in sorted(quotes, key=lambda q: (q.expiry, q.strike, q.kind)):

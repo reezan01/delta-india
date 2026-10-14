@@ -74,6 +74,13 @@ and pages beyond that, so a long sleep is caught up rather than left as a gap.
 
 To add symbols, edit `watchlist.toml`. Nothing needs reinstalling.
 
+The `[options]` block in the watchlist also saves the **full options chain** for each
+underlying on every run, to `data/options/{UND}/{date}/{HHMMSS}.csv.gz`. That's every contract
+with greeks and IVs, in the same columns as `delta chain --save`. Read a snapshot with
+`pandas.read_csv(path)` or `gzip -dc path`. A snapshot is flagged STALE when its median
+ticker is more than 5 min old, so a frozen options feed is reported instead of being saved silently.
+Size is about 40 KB (BTC) plus 22 KB (ETH) per run, roughly 6 MB/day or 2 GB/year.
+
 ## Facts verified against the live API (2026-10-14)
 
 | | |

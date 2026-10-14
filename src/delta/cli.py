@@ -85,7 +85,7 @@ def cmd_update(rest: DeltaRest, args, data_dir: Path) -> int:
         bad += status != "ok"
         if status == "ok" and args.quiet_ok:
             continue
-        print(f"{stamp}  {status:<5} {r.symbol:<14} {r.resolution:<4} +{r.appended:<6} last {last}"
+        print(f"{stamp}  {status:<5} {r.symbol:<14} {r.resolution:<5} +{r.appended:<6} last {last}"
               + (f"  {r.error}" if r.error else ""))
     print(f"{stamp}  done: {len(results)} series, {bad} not ok, {time.time() - started:.1f}s")
     return 1 if bad else 0

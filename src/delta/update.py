@@ -14,6 +14,10 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from datetime import datetime, timezone
+from statistics import median
+
+from delta.options import OptionQuote, write_snapshot_csv
 from delta.rest import RESOLUTION_SECONDS, DeltaRest
 from delta.store import append_candles, candle_path, last_time
 
@@ -22,6 +26,9 @@ log = logging.getLogger(__name__)
 # History pulled the first time a series is seen (days). Delta India starts 2023-12-29.
 DEFAULT_INITIAL_DAYS = {"1m": 30, "3m": 60, "5m": 180, "15m": 365, "30m": 365,
                         "1h": 730, "2h": 730, "4h": 1100, "6h": 1100, "1d": 1100, "1w": 1100}
+
+# An options snapshot whose median ticker is older than this is a frozen feed, not a market.
+OPTIONS_STALE_SECONDS = 300
 
 # A closed bar should exist within this many bar-lengths of now; beyond it the series is stale.
 STALE_BARS = 3
@@ -58,7 +65,36 @@ def sync_series(rest: DeltaRest, data_dir: Path, symbol: str, resolution: str,
     return res
 
 
-def load_watchlist(path: Path) -> list[tuple[str, str, int | None]]:
+def snapshot_options(rest: DeltaRest, data_dir: Path, underlying: str,
+                     now: datetime | None = None) -> SeriesResult:
+    """Save the full chain to data/options/{UND}/{date}/{HHMMSS}.csv.gz.
+
+    Reported as resolution "chain"; `appended` is the number of contracts written.
+    """
+    taken = now or datetime.now(timezone.utc)
+    res = SeriesResult(underlying.upper(), "chain", last_bar=int(taken.timestamp()))
+    try:
+        quotes = [OptionQuote.from_ticker(t) for t in rest.option_tickers(underlying)]
+        if not quotes:
+            raise ValueError(f"no options returned for {underlying}")
+        path = (Path(data_dir) / "options" / underlying.upper() / taken.strftime("%Y-%m-%d")
+                / f"{taken.strftime('%H%M%S')}.csv.gz")
+        write_snapshot_csv(path, quotes, taken)
+        res.appended = len(quotes)
+        ages = [taken.timestamp() - q.ticker_ts / 1e6 for q in quotes if q.ticker_ts]
+        res.stale = not ages or median(ages) > OPTIONS_STALE_SECONDS
+    except Exception as e:  # isolate per underlying
+        res.error = f"{type(e).__name__}: {e}"
+        res.stale = True
+    return res
+
+
+def load_option_underlyings(path: Path) -> list[str]:
+    """[options] underlyings=[...]"""
+    return list(tomllib.loads(path.read_text()).get("options", {}).get("underlyings", []))
+
+
+def load_watchlist(path: Path, allow_empty: bool = False) -> list[tuple[str, str, int | None]]:
     """[[series]] symbols=[...] resolutions=[...] initial_days=<optional>"""
     cfg = tomllib.loads(path.read_text())
     out = []
@@ -68,7 +104,7 @@ def load_watchlist(path: Path) -> list[tuple[str, str, int | None]]:
                 if r not in RESOLUTION_SECONDS:
                     raise ValueError(f"{path}: unknown resolution {r!r}")
                 out.append((sym, r, block.get("initial_days")))
-    if not out:
+    if not out and not allow_empty:
         raise ValueError(f"{path}: no [[series]] entries")
     return out
 
@@ -81,7 +117,11 @@ def run_update(rest: DeltaRest, data_dir: Path, watchlist: Path) -> list[SeriesR
     except BlockingIOError:
         raise RuntimeError("another `delta update` is still running") from None
     try:
-        return [sync_series(rest, data_dir, s, r, d) for s, r, d in load_watchlist(watchlist)]
+        underlyings = load_option_underlyings(watchlist)
+        series = load_watchlist(watchlist, allow_empty=bool(underlyings))
+        results = [sync_series(rest, data_dir, s, r, d) for s, r, d in series]
+        results += [snapshot_options(rest, data_dir, u) for u in underlyings]
+        return results
     finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
         lock.close()

@@ -5,3 +5,8 @@
 [[series]]
 symbols = ["BTCUSD", "ETHUSD"]
 resolutions = ["1m", "5m", "15m", "1h", "4h", "1d"]
+
+# Full options chain (every contract, with greeks) saved each run to
+# data/options/{UNDERLYING}/{date}/{HHMMSS}.csv.gz — ~40 KB per BTC snapshot.
+[options]
+underlyings = ["BTC", "ETH"]
